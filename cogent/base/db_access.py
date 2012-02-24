@@ -3,12 +3,19 @@ from sqlalchemy.orm import sessionmaker
 import sqlalchemy.orm.query
 from datetime import datetime
 import os.path
-try:
-    from base.model import *
-except:
-    from cogent.base.model import *
 import csv
 import scipy.stats as stats
+
+from cogent.base.model import *
+
+
+reading_types = ['temperature', 'd_temperature', 'humidity', 'd_humidity', 'tsr', 'par', 'battery', 'd_battery', 'co2', 'aq', 'voc', 'cc','duty','error','size_v1','cc_min','cc_max','cc_kwh']
+node_types = ['standard', 'electricity', 'co2', 'aq', 'heat_meter']
+reading_limits = {
+        'temperature' : (0.0, 50.0),
+        'humidity'    : (0.0, 100.0),
+        'co2'         : (0.0, 6000.0)
+    }
 
 
 # Yes, run this when this file is imported
@@ -54,13 +61,11 @@ def get_calibration(session, node_id, reading_type):
     return values
 
 
-reading_types = ['temperature', '', 'humidity', '', 'tsr', 'par', 'battery', '', 'co2', 'aq', 'voc', 'cc']
-node_types = ['standard', 'electricity', 'co2', 'aq', 'heat_meter']
-reading_limits = {
-        'temperature' : (0.0, 50.0),
-        'humidity'    : (0.0, 100.0),
-        'co2'         : (0.0, 6000.0)
-    }
+def get_calibration_db(session, node_id, reading_type):
+	rtype_id = reading_types.index(reading_type)
+	row = session.query(Sensor.calibrationSlope, Sensor.calibrationOffset).filter(and_(Sensor.nodeId == node_id, Sensor.sensorTypeId == rtype_id)).first()
+	if row == None: return (1.0, 0.0)
+	return (row.calibrationSlope, row.calibrationOffset)
 
 
 def _query_by_node_and_type(session, node_id, reading_type, start_time, end_time, filter_values = True):
@@ -107,11 +112,22 @@ def create_db_engine_mysql(username, database, host='localhost'):
 def create_session(db_engine):
     Session = sessionmaker(bind=db_engine)
     return Session()
+    
+
+def create_session_mysql(username, database, host='localhost'):
+    db_engine = create_db_engine_mysql(username, database, host)
+    return create_session(db_engine)
 
 
+# Need to add an optional Deployment specification
 def get_house_address(session, house_id):
     row = session.query(House).filter(House.id==house_id).first()
     return row.address
+
+
+def get_house_id(session, address):
+    row = session.query(House).filter(House.address==address).first()
+    return row.id
 
 
 def get_node_locations_by_house(session, house_id, include_external=True):
@@ -123,20 +139,15 @@ def get_node_locations_by_house(session, house_id, include_external=True):
 
         if row.nodeTypeId == node_types.index('electricity'):
             if include_external:
-                node_details[node_id] = 'External'
+                node_details['External'] = node_id
         else:
-            node_details[node_id] = row.room.name
+            node_details[row.room.name] = node_id
     
     return node_details
 
 
-def get_node_list(session):
-    # Can be made faster by not relying on get_node_locations()
-    return get_node_locations(session).keys()
-
-
-def get_data_by_type(session, reading_type, start_time = datetime.fromtimestamp(0), end_time = datetime.now(), filter_values = True):
-    rows = _query_by_type(session, reading_type, start_time, end_time, filter_values)
+def get_data_by_type(session, reading_type, start_time = datetime.fromtimestamp(0), end_time = datetime.now(), postprocess=True, cal_func=get_calibration):
+    rows = _query_by_type(session, reading_type, start_time, end_time, filter_values = False)
     rows.order_by(Reading.time)
 
     data = {}
@@ -146,16 +157,41 @@ def get_data_by_type(session, reading_type, start_time = datetime.fromtimestamp(
             data[node_id] = []
         data[node_id].append((row.time, row.value))
     
+    if postprocess:
+        for node_id,values in data.iteritems():
+            m, c = cal_func(session, node_id, reading_type)
+            data[node_id] = [(row[0], m * row[1] + c) for row in values]
+        data = clean_data(data, reading_type)
+    
+    return data
+
+
+def get_data_by_node_and_type(session, node_id, reading_type, start_time = datetime.fromtimestamp(0), end_time = datetime.now(), postprocess=True, cal_func=get_calibration):
+    rows = _query_by_node_and_type(session, node_id, reading_type, start_time, end_time, filter_values = False)
+    rows.order_by(Reading.time)
+    
+    data = []
+    for time,value in rows:
+        data.append((time, value))
+
+    if postprocess:
+        m, c = cal_func(session, node_id, reading_type)
+        data = [(row[0], m * row[1] + c) for row in data]
+        data = clean_data(data, reading_type)
+    
     return data
     
 
 def clean_data(data, reading_type = None):
+    if len(data) == 0: return data
+
     if type(data) == list:
         return _clean_data(data, reading_type)
     elif type(data) == dict:
         cleaned = {}
         for key,value in data.iteritems():
-            cleaned[key] = clean_data(value, reading_type)
+            cd = clean_data(value, reading_type)
+            if len(cd) > 0: cleaned[key] = cd
         return cleaned
     elif type(data) == sqlalchemy.orm.query.Query:
         clean_data(data.all(), reading_type)
@@ -163,41 +199,6 @@ def clean_data(data, reading_type = None):
         import sys
         print >> sys.stderr, "Bad data for cleaning:", type(data)
         exit(1)
-
-
-def get_data_by_node_and_type(session, node_id, reading_type, start_time = datetime.fromtimestamp(0), end_time = datetime.now(), filter_values = True):
-    rows = _query_by_node_and_type(session, node_id, reading_type, start_time, end_time, filter_values)
-    rows.order_by(Reading.time)
-    
-    data = []
-    for time,value in rows:
-        data.append((time, value))
-    
-    return data
-    
-
-def _get_outlier_thresholds(data):
-    # 1.5 times the IQR from the upper and lower quartiles (2 times the IQR from the median)
-    lq  = stats.scoreatpercentile(data, 25)			# Lower quartile (25%)
-    uq  = stats.scoreatpercentile(data, 75)			# Upper quartile (75%)
-    iqr = uq - lq					                # Interquartile range
-    ub  = uq + (1.5 * iqr)			                # Upper outlier threshold
-    lb  = lq - (1.5 * iqr)			                # Lower outlier threshold
-    return (ub, lb)
-
-        
-def get_data_by_type_clean(session, reading_type, start_time = datetime.fromtimestamp(0), end_time = datetime.now()):
-    data = get_data_by_type(session, reading_type, start_time, end_time)
-    
-    cleaned = {}
-    for node_id, readings in data.iteritems():
-        cleaned[node_id] = _clean_data(readings, reading_type)
-        
-    return cleaned
-
-def get_data_by_node_and_type_clean(session, node_id, reading_type, start_time = datetime.fromtimestamp(0), end_time = datetime.now()):
-    data = get_data_by_node_and_type(session, node_id, reading_type, start_time, end_time)
-    return _clean_data(data, reading_type)
 
 def _clean_data(data, reading_type = None):
     if reading_type != None and reading_type in reading_limits:
@@ -209,17 +210,17 @@ def _clean_data(data, reading_type = None):
         if ((value < ub) and (value > lb)):
             cleaned.append((time, value))
     return cleaned
-
-
-def get_clean_data_test():
-    time_format = "%d/%m/%Y"
-    sd=datetime.fromtimestamp(time.mktime(time.strptime("01/01/2012", time_format)))
-    ed=datetime.fromtimestamp(time.mktime(time.strptime("05/01/2012", time_format)))
-    db_engine = create_db_engine_mysql('ross', "SampsonClose")
-    session = create_session(db_engine)
-    qry = get_data_by_type_clean(session, 'temperature', sd, ed)
-    qry = get_data_by_node_and_type_clean(session, 11, 'temperature', sd, ed)
     
+
+def _get_outlier_thresholds(data):
+    # 1.5 times the IQR from the upper and lower quartiles (2 times the IQR from the median)
+    lq  = stats.scoreatpercentile(data, 25)			# Lower quartile (25%)
+    uq  = stats.scoreatpercentile(data, 75)			# Upper quartile (75%)
+    iqr = uq - lq					                # Interquartile range
+    ub  = uq + (1.5 * iqr)			                # Upper outlier threshold
+    lb  = lq - (1.5 * iqr)			                # Lower outlier threshold
+    return (ub, lb)
+
 
 def get_yield(session, node_id, reading_type, start_time = datetime.fromtimestamp(0), end_time = datetime.now()):
     days = int((end_time - start_time).days)

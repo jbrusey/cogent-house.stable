@@ -5,6 +5,7 @@ from datetime import datetime
 import os.path
 import csv
 import scipy.stats as stats
+import sys
 
 from cogent.base.model import *
 
@@ -52,6 +53,7 @@ fetch_calib('hum_coeffs.csv', 'humidity')
 fetch_calib('co2_coeffs.csv', 'co2')
 fetch_calib('voc_coeffs.csv', 'voc')
 fetch_calib('aq_coeffs.csv', 'aq')
+fetch_calib('cc_coeffs.csv', 'cc')
     
 def get_calibration(session, node_id, reading_type):
     try:

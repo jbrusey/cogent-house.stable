@@ -162,10 +162,12 @@ def get_data_by_type(session, reading_type, start_time = datetime.fromtimestamp(
             data[node_id] = []
         data[node_id].append((row.time, row.value))
     
-    if postprocess:
+    if cal_func != None:
         for node_id,values in data.iteritems():
             m, c = cal_func(session, node_id, reading_type)
             data[node_id] = [(row[0], m * row[1] + c) for row in values]
+    
+    if postprocess:
         data = clean_data(data, reading_type)
     
     return data
@@ -182,9 +184,11 @@ def get_data_by_node_and_type(session, node_id, reading_type, start_time = datet
     for time,value in rows:
         data.append((time, value))
 
-    if postprocess:
+    if cal_func != None:
         m, c = cal_func(session, node_id, reading_type)
         data = [(row[0], m * row[1] + c) for row in data]
+
+    if postprocess:
         data = clean_data(data, reading_type)
     
     return data
@@ -251,4 +255,35 @@ def get_houses(session):
 
 def node_is_battery_powered(session, node_id):
     return node_id < 2000
+
+
+def get_node_type(session, node_id):
+    return session.query(Node.nodeTypeId).filter(Node.id==node_id).first()[0]
+
+
+def node_has_co2(session, node_id):
+    node_type = get_node_type(session, node_id)
+    if node_type in [2, 3]:
+        return True
+    return False
+
+
+def node_has_cc(session, node_id):
+    node_type = get_node_type(session, node_id)
+    if node_type == 1:
+        return True
+    return False
+
+
+def node_has_voc(session, node_id):
+    node_type = get_node_type(session, node_id)
+    if node_type == 3:
+        return True
+    return False
+    
+def node_has_aq(session, node_id):
+    node_type = get_node_type(session, node_id)
+    if node_type == 3:
+        return True
+    return False
 
